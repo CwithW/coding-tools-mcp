@@ -2945,21 +2945,30 @@ class Runtime:
             additions = 0
             removals = 0
             for op in operations:
-                self._validate_patch_path(op.path, require_existing=op.kind in {"update", "delete"})
+                target = self.workspace.resolve_for_write(op.path)
+                prior = staged.get(target.display)
+                if op.kind in {"update", "delete"}:
+                    # A previous move can create this path only in staging.
+                    # Require an on-disk source only when it has no staged state.
+                    if prior is None:
+                        target = self.workspace.resolve_existing(op.path)
+                    elif prior.content is None:
+                        raise ToolFailure(
+                            "PATCH_FAILED", f"Cannot {op.kind} a deleted file.", category="validation"
+                        )
                 if op.kind in {"add", "update", "delete"}:
                     self.workspace.reject_write_symlink(op.path)
                 if op.move_to:
                     self._validate_patch_path(op.move_to, require_existing=False)
                     self.workspace.reject_write_symlink(op.move_to)
                 if op.kind == "add":
-                    target = self.workspace.resolve_for_write(op.path)
-                    baseline = FileBaseline.capture(target.path)
+                    baseline = prior.baseline if prior is not None else FileBaseline.capture(target.path)
                     staged[target.display] = StagedFile(
                         target.display,
                         target.path,
                         op.add_content or "",
                         baseline,
-                        baseline.mode,
+                        prior.mode if prior is not None else baseline.mode,
                     )
                     added_text = op.add_content or ""
                     # Add is a full destination overwrite. Evidence must
@@ -2981,10 +2990,8 @@ class Runtime:
                     if baseline.data is not None:
                         removals += len(baseline.data.splitlines())
                 elif op.kind == "delete":
-                    target = self.workspace.resolve_existing(op.path)
                     if target.path.is_dir():
                         raise ToolFailure("PATCH_FAILED", "Cannot delete a directory.", category="validation")
-                    prior = staged.get(target.display)
                     baseline = prior.baseline if prior is not None else FileBaseline.capture(target.path)
                     staged[target.display] = StagedFile(
                         target.display, target.path, None, baseline, baseline.mode, action="delete"
@@ -2996,12 +3003,9 @@ class Runtime:
                     summaries.append(f"D {target.display}")
                     removals += len((baseline.data or b"").splitlines())
                 elif op.kind == "update":
-                    source = self.workspace.resolve_existing(op.path)
+                    source = target
                     if source.path.is_dir():
                         raise ToolFailure("PATCH_FAILED", "Cannot update a directory.", category="validation")
-                    prior = staged.get(source.display)
-                    if prior is not None and prior.content is None:
-                        raise ToolFailure("PATCH_FAILED", "Cannot update a deleted file.", category="validation")
                     baseline = prior.baseline if prior is not None else FileBaseline.capture(source.path)
                     content = prior.content if prior is not None else baseline.text(source.display)
                     assert content is not None
@@ -3023,7 +3027,14 @@ class Runtime:
                         # no-op, but relocating the file is still a write.
                         if operation_already_applied and dest.display == source.display:
                             already_applied_operations += 1
-                        dest_baseline = baseline if dest.display == source.display else FileBaseline.capture(dest.path)
+                        dest_prior = staged.get(dest.display)
+                        # Keep the first snapshot for the entire transaction;
+                        # recapturing a shared destination could accept and then
+                        # overwrite an intervening external edit.
+                        dest_baseline = (
+                            dest_prior.baseline if dest_prior is not None else
+                            baseline if dest.display == source.display else FileBaseline.capture(dest.path)
+                        )
                         destination_evidence = _patch_evidence(
                             updated,
                             changed_ranges_between(

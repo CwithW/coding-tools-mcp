@@ -2256,6 +2256,97 @@ class CodexApplyPatchCompatibilityTests(unittest.TestCase):
                 {"path": "a.txt", "operation": "delete", "total_lines": 0},
             )
 
+    def test_new_move_destination_can_be_updated_deleted_or_moved(self) -> None:
+        for action in ("update", "delete", "move"):
+            with self.subTest(action=action), self._runtime("one\n") as (workspace, runtime):
+                destination = "nested/destination.txt"
+                if action == "delete":
+                    followup = f"*** Delete File: {destination}\n"
+                else:
+                    followup = f"*** Update File: {destination}\n"
+                    if action == "move":
+                        followup += "*** Move to: final.txt\n"
+                    followup += "@@\n-ONE\n+TWO\n"
+                payload = runtime.apply_patch({"patch": (
+                    "*** Begin Patch\n"
+                    "*** Update File: app.py\n"
+                    f"*** Move to: {destination}\n"
+                    "@@\n-one\n+ONE\n"
+                    f"{followup}"
+                    "*** End Patch\n"
+                )})
+                self.assertFalse((workspace / "app.py").exists())
+                if action == "update":
+                    self.assertEqual((workspace / destination).read_text(), "TWO\n")
+                else:
+                    self.assertFalse((workspace / destination).exists())
+                if action == "move":
+                    self.assertEqual((workspace / "final.txt").read_text(), "TWO\n")
+                for entry in payload["affected_files"]:
+                    path = workspace / entry["path"]
+                    if entry["operation"] == "delete":
+                        self.assertFalse(path.exists())
+                    else:
+                        self.assertEqual(entry["revision"], content_revision(path.read_text()))
+
+    @unittest.skipIf(os.name == "nt", "POSIX executable modes")
+    def test_add_after_move_preserves_staged_source_mode(self) -> None:
+        for destination_exists in (False, True):
+            with self.subTest(destination_exists=destination_exists), self._runtime("one\n") as (workspace, runtime):
+                (workspace / "app.py").chmod(0o755)
+                destination = workspace / "destination.txt"
+                if destination_exists:
+                    destination.write_text("original\n")
+                    destination.chmod(0o644)
+                runtime.apply_patch({"patch": (
+                    "*** Begin Patch\n"
+                    "*** Update File: app.py\n"
+                    "*** Move to: destination.txt\n"
+                    "@@\n-one\n+ONE\n"
+                    "*** Add File: destination.txt\n"
+                    "+replacement\n"
+                    "*** End Patch\n"
+                )})
+                self.assertEqual(destination.read_text(), "replacement\n")
+                self.assertEqual(destination.stat().st_mode & 0o777, 0o755)
+
+    def test_repeated_destination_keeps_the_first_conflict_baseline(self) -> None:
+        for final_action in ("add", "move"):
+            with self.subTest(final_action=final_action), self._runtime("one\n") as (workspace, runtime):
+                destination = workspace / "destination.txt"
+                destination.write_text("original\n")
+                (workspace / "second.txt").write_text("two\n")
+                final_operation = (
+                    "*** Add File: destination.txt\n+replacement\n"
+                    if final_action == "add" else
+                    "*** Update File: second.txt\n"
+                    "*** Move to: destination.txt\n@@\n-two\n+TWO\n"
+                )
+                original_capture = FileBaseline.capture
+                edited = False
+
+                def edit_after_first_capture(path: Path) -> FileBaseline:
+                    nonlocal edited
+                    baseline = original_capture(path)
+                    if path == destination and not edited:
+                        destination.write_text("concurrent edit\n")
+                        edited = True
+                    return baseline
+
+                with patch.object(FileBaseline, "capture", side_effect=edit_after_first_capture):
+                    with self.assertRaises(ToolFailure) as raised:
+                        runtime.apply_patch({"patch": (
+                            "*** Begin Patch\n"
+                            "*** Update File: app.py\n"
+                            "*** Move to: destination.txt\n@@\n-one\n+ONE\n"
+                            f"{final_operation}"
+                            "*** End Patch\n"
+                        )})
+                self.assertEqual(raised.exception.code, "PATCH_CONFLICT")
+                self.assertEqual(destination.read_text(), "concurrent edit\n")
+                self.assertEqual((workspace / "app.py").read_text(), "one\n")
+                self.assertEqual((workspace / "second.txt").read_text(), "two\n")
+
 
 
 class PatchEvidenceAndIdempotencyTests(unittest.TestCase):

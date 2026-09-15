@@ -129,6 +129,11 @@ The v0.5.0 reliability work. Migration notes:
 
 ### Fixed
 
+- **Chained patch operations retain staged file state.** A newly moved
+  destination can be updated, deleted, or moved again in the same envelope,
+  and a later `Add File` overwrite preserves its staged executable mode.
+  Repeated destination writes keep the first baseline, so an intervening
+  external edit raises `PATCH_CONFLICT` instead of being overwritten.
 - **`apply_changes` no longer doubles carriage returns in CRLF replacement
   content.** Replacement text now normalizes LF, CRLF, and CR separators before
   the file's original line-ending convention is restored, so returned
