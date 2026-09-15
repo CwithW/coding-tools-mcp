@@ -178,13 +178,6 @@ class BreakerInRuntimeTests(unittest.TestCase):
                         "patch": (
                             "*** Begin Patch\n"
                             "*** Update File: app.py\n"
-                            "@@\n"
-                            "-one\n"
-                            "+ONE\n"
-                            "*** Update File: app.py\n"
-                            "@@\n"
-                            "-ONE\n"
-                            "+one\n"
                             "*** End Patch\n"
                         )
                     }
@@ -469,6 +462,7 @@ class BreakerInRuntimeTests(unittest.TestCase):
                 workspace_mutation=WorkspaceMutationPolicy(mode="structured-only"),
             )
             try:
+                mutation = runtime.workspace_mutation_payload()
                 args = {"path": "late.txt"}
                 self.call(runtime, args)
                 self.call(runtime, args)
@@ -484,7 +478,10 @@ class BreakerInRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
         self.assertEqual(command["structuredContent"]["operation_outcome"], "exited_0")
-        self.assertEqual(read["structuredContent"]["error"]["code"], "REPEATED_CALL_BLOCKED")
+        if mutation["enforced"]:
+            self.assertEqual(read["structuredContent"]["error"]["code"], "REPEATED_CALL_BLOCKED")
+        else:
+            self.assertEqual(read["structuredContent"]["error"]["code"], "NOT_FOUND")
 
     def test_unenforced_structured_only_mode_clears_stale_verdicts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

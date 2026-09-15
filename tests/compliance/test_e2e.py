@@ -65,6 +65,7 @@ class DeterministicE2ETests(ComplianceTestCase):
             self.assertIn("def square", self.tool_text(diff))
 
     def test_long_running_stdin_command(self) -> None:
+        self.require_pty()
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",
@@ -79,6 +80,7 @@ class DeterministicE2ETests(ComplianceTestCase):
             self.assertIn("bye", self.tool_text(bye))
 
     def test_long_running_command_poll_exit_and_closed_stdin_error(self) -> None:
+        self.require_pty()
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",

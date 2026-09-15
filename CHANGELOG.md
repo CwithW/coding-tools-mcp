@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 - 2026-09-14
 
 The v0.5.0 reliability work. Migration notes:
 [docs/migration-0.5.md](docs/migration-0.5.md); rationale:
@@ -87,8 +87,7 @@ The v0.5.0 reliability work. Migration notes:
 - **A successful patch returns evidence**: `changed_ranges`, a per-file
   `revision`, and `total_lines`. These are evidence only; `apply_patch` still
   takes no `revision` argument, because its context lines are already its
-  optimistic check. For chained blocks, ranges describe the net original
-  baseline-to-final result rather than accumulated intermediate ranges.
+  optimistic check.
 - **A failed patch returns repair data**: the hunk index, nearby numbered text,
   and candidate match positions, so the next attempt can be aimed.
 - **A patch whose changes are already present reports `already_applied`**
@@ -99,10 +98,12 @@ The v0.5.0 reliability work. Migration notes:
   fails with `PATCH_CONTEXT_NOT_FOUND`. A `*** Move to:` that actually
   relocates the file remains a write and reports `already_applied: false` even
   when every hunk was already present.
-- **Same-path chaining in `apply_patch` is now promised.** Several
-  `*** Update File` blocks naming one path in one envelope chain in order. This
-  already worked and is now documented, unit-tested, and covered by
-  `make test-patch-repro` in CI.
+- **`apply_patch` now follows Codex primary-path and overwrite semantics.** An
+  operation's primary path may appear only once in an envelope, including
+  aliases such as `a.txt` and `./a.txt`. `Add File` may replace an existing
+  file, `Move to` may replace an existing destination, and distinct source
+  files may move to the same destination in order, with the later write
+  winning.
 - **`apply_changes` compares paths after resolving them**, so `a.txt` and
   `./a.txt` are one path: naming both is `INVALID_ARGUMENT` rather than a
   silent overwrite reported as two applied changes.
@@ -125,6 +126,21 @@ The v0.5.0 reliability work. Migration notes:
 - The runtime contract now states that `patch_lock` serializes patches within
   one server process only; two servers on one workspace are protected by the
   pre-commit baseline recheck alone.
+
+### Fixed
+
+- **`apply_changes` no longer doubles carriage returns in CRLF replacement
+  content.** Replacement text now normalizes LF, CRLF, and CR separators before
+  the file's original line-ending convention is restored, so returned
+  `total_lines` and `changed_ranges` stay consistent with a subsequent
+  `read_file`.
+- Release-gate tests now distinguish unavailable Landlock/PTY host capabilities
+  from product behavior and no longer race the 16-command concurrency limit
+  while testing completed-command retention.
+- Regenerated `uv.lock` from the v0.5.0 release metadata, including the current
+  `mcp` and `PyYAML` development dependencies. The release checker now rejects
+  a checked-in uv lock whose project version or dev dependency set has drifted
+  from `pyproject.toml`.
 
 ### Other
 

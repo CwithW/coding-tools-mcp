@@ -790,7 +790,9 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             "at the end. A blank context line may be written as \"\" or as a single space. Matching is "
             "graded exact, then ignoring trailing whitespace, then ignoring indentation width, and the "
             "grade actually used comes back as match_quality. Success returns each file's revision, "
-            "total_lines, and changed_ranges. Several updates to one path in one envelope chain in order. "
+            "total_lines, and changed_ranges. Each operation's primary path may appear only once per "
+            "envelope. Add File may replace an existing file; Move to may replace an existing destination, "
+            "and distinct source paths may move to the same destination in order (the later write wins). "
             "Full format reference: docs/tools-and-schemas.md. Example: "
             "*** Begin Patch\n*** Update File: app.py\n@@\n-old\n+new\n*** End Patch"
         ),
@@ -806,8 +808,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             "copy always need that revision; create rejects it and asserts absence. edit takes line "
             "operations (replace, delete, insert_after, insert_before) whose numbers all refer to the "
             "file as read, not to the result of earlier edits in the same call. content is whole lines: "
-            "\"\" is zero lines and a trailing newline adds a blank line. One path per call; use "
-            "apply_patch to chain several edits onto one file. Example: {\"changes\":[{\"action\":\"edit\","
+            "\"\" is zero lines and a trailing newline adds a blank line. One path per call; combine "
+            "multiple line edits for one file into that file's single edit change. Example: {\"changes\":[{\"action\":\"edit\","
             "\"path\":\"app.py\",\"revision\":\"<from read_file>\",\"edits\":[{\"op\":\"replace\","
             "\"start_line\":10,\"end_line\":12,\"content\":\"new line\"}]}]}"
         ),
@@ -2901,6 +2903,24 @@ class Runtime:
         dry_run = bool(args.get("dry_run", False))
         with self.patch_lock:
             operations = parse_patch(patch)
+            # Match the Codex tool-entry contract: an operation's primary
+            # path may appear only once in one envelope. Move destinations are
+            # deliberately not primary paths, so distinct sources may still
+            # move to the same destination and the later write wins.
+            primary_paths: dict[str, int] = {}
+            for operation_index, operation in enumerate(operations):
+                display = self._resolve_patch_path(operation.path, require_existing=False)
+                if display in primary_paths:
+                    raise ToolFailure(
+                        "PATCH_FAILED",
+                        f"Patch names the primary path {display} more than once.",
+                        category="validation",
+                        details={
+                            "path": display,
+                            "operation_indexes": [primary_paths[display], operation_index],
+                        },
+                    )
+                primary_paths[display] = operation_index
             staged: dict[str, StagedFile] = {}
             summaries: list[str] = []
             affected: dict[str, dict[str, Any]] = {}
@@ -2917,27 +2937,30 @@ class Runtime:
                     self.workspace.reject_write_symlink(op.move_to)
                 if op.kind == "add":
                     target = self.workspace.resolve_for_write(op.path)
-                    if target.existed:
-                        raise ToolFailure("PATCH_FAILED", "Cannot add file that already exists.", category="validation")
                     baseline = FileBaseline.capture(target.path)
                     staged[target.display] = StagedFile(
                         target.display,
                         target.path,
                         op.add_content or "",
                         baseline,
-                        None,
+                        baseline.mode,
                     )
                     added_text = op.add_content or ""
+                    added_range = _whole_file_range(added_text)
+                    if baseline.data is not None and added_range:
+                        added_range[0]["removed_lines"] = len(baseline.data.splitlines())
                     _merge_patch_affected_file(
                         affected,
                         {
                             "path": target.display,
                             "operation": "add",
-                            **_patch_evidence(added_text, _whole_file_range(added_text)),
+                            **_patch_evidence(added_text, added_range),
                         },
                     )
                     summaries.append(f"A {target.display}")
                     additions += len(added_text.splitlines())
+                    if baseline.data is not None:
+                        removals += len(baseline.data.splitlines())
                 elif op.kind == "delete":
                     target = self.workspace.resolve_existing(op.path)
                     if target.path.is_dir():
@@ -2977,8 +3000,6 @@ class Runtime:
                     source_mode = prior.mode if prior is not None else baseline.mode
                     if op.move_to:
                         dest = self.workspace.resolve_for_write(op.move_to)
-                        if dest.existed and dest.display != source.display:
-                            raise ToolFailure("PATCH_FAILED", "Cannot move over an existing file.", category="validation")
                         # Already-matching hunks make the content update a
                         # no-op, but relocating the file is still a write.
                         if operation_already_applied and dest.display == source.display:

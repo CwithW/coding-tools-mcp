@@ -175,8 +175,11 @@ CASES: list[Case] = [
         expect_payload={"error_code": "PATCH_CONTEXT_NOT_FOUND", "has_nearby_text": True},
     ),
     Case(
-        name="D-2 same-path chaining inside one envelope",
-        why="Two updates to one path chain on the prior staged content; this is a promise now.",
+        name="D-2 duplicate primary paths are rejected before writes",
+        why=(
+            "The Codex tool entry rejects multiple operations that use the same primary path; "
+            "the whole envelope must fail before the first update is committed."
+        ),
         files={"app.py": "one\ntwo\n"},
         patch="""*** Begin Patch
 *** Update File: app.py
@@ -189,7 +192,7 @@ CASES: list[Case] = [
 +TWO
 *** End Patch
 """,
-        expect_contains={"app.py": "ONE\nTWO\n"},
+        expect_payload={"error_code": "PATCH_FAILED"},
     ),
     Case(
         name="C5 failure carries repair data",

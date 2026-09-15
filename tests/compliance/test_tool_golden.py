@@ -105,7 +105,9 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
         self.assertEqual(add_payload.get("additions"), 3)
         self.assertEqual(add_payload.get("removals"), 0)
         self.assertIn("Added by apply_patch", self.tool_text(self.client.call_tool("read_file", {"path": "docs/NOTES.md"})))
-        self.assert_tool_error("apply_patch", {"patch": add})
+        overwrite_payload = self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": add}))
+        self.assertEqual(overwrite_payload.get("additions"), 3)
+        self.assertEqual(overwrite_payload.get("removals"), 3)
 
         with self.session_for_fixture("tiny-js-project") as (_workspace, client):
             dry_run_add = """*** Begin Patch
@@ -324,6 +326,7 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
         )
 
     def test_write_stdin_kill_command_git_status_and_git_diff(self) -> None:
+        self.require_pty()
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",
