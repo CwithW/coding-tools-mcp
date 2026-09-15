@@ -78,9 +78,9 @@ The v0.5.0 reliability work. Migration notes:
 
 ### Changed
 
-- **`apply_patch` locates hunks with more than context.** `@@ <scope>` headers
-  and `*** End of File` now participate in placing a hunk instead of being
-  ignored.
+- **`apply_patch` locates hunks with forward text anchors.** `@@ <context>`
+  advances a language-agnostic search cursor; it does not infer function or
+  block boundaries. `*** End of File` also participates in placement.
 - **Patch matching is graded** — exact, then ignoring trailing whitespace, then
   ignoring indentation width — and the grade actually used is reported in
   `match_quality`, so a downgrade is visible rather than silent.
@@ -134,16 +134,25 @@ The v0.5.0 reliability work. Migration notes:
   the file's original line-ending convention is restored, so returned
   `total_lines` and `changed_ranges` stay consistent with a subsequent
   `read_file`.
-- **Named `@@ <scope>` patch anchors are now strict correctness boundaries.** A
-  patch cannot silently fall back to an identical match in another function
-  when the named scope is missing or no longer contains the requested context.
+- **`@@ <context>` now follows Codex-style forward-cursor semantics.** Missing
+  anchors fail instead of being ignored, matching never jumps back before the
+  anchor/current cursor, top-level and brace-based code are not rejected by
+  indentation heuristics, and pure-addition hunks validate their anchor before
+  appending at EOF.
 - **Move evidence and breaker invalidation now follow actual staged
   mutations.** Moves that change paths retain an explicit source deletion in
   `affected_files`, and successful workspace-mutation invalidation is derived
   from committed staged actions rather than compressed display evidence.
+- **Move mode preservation now survives later content reversion.** A staged
+  file is considered unchanged only when both its content and mode match the
+  original destination baseline, so an executable source moved over a
+  non-executable destination keeps its executable bit even if later patch
+  operations restore the destination's original bytes.
 - **Whole-file `apply_changes` evidence now reports line counts consistently.**
   Rewriting identical content reports zero additions/removals, and replacement
-  ranges count removed lines from the original file.
+  ranges count removed lines from the original file. Bare-CR content is also
+  counted with the same universal-newline rules as `read_file` without
+  rewriting the user's bytes.
 - The long-running PTY compliance test now polls the bounded terminal stream
   for final child output instead of assuming input echo and process output
   arrive in one response.

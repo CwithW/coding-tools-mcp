@@ -216,6 +216,30 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
         self.assertFalse(source.exists())
         self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o755)
 
+    def test_move_mode_survives_when_destination_content_returns_to_baseline(self) -> None:
+        source = self.workspace.root / "a.sh"
+        destination = self.workspace.root / "b.sh"
+        source.write_text("echo A\n", encoding="utf-8")
+        source.chmod(0o755)
+        destination.write_text("echo B\n", encoding="utf-8")
+        destination.chmod(0o644)
+        patch = """*** Begin Patch
+*** Update File: a.sh
+*** Move to: b.sh
+@@
+-echo A
++echo C
+*** Update File: b.sh
+@@
+-echo C
++echo B
+*** End Patch
+"""
+        self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": patch}))
+        self.assertFalse(source.exists())
+        self.assertEqual(destination.read_text(encoding="utf-8"), "echo B\n")
+        self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o755)
+
     def test_apply_patch_rejects_absolute_traversal_and_symlink_escape(self) -> None:
         absolute = f"""*** Begin Patch
 *** Add File: {self.workspace.outside_secret}

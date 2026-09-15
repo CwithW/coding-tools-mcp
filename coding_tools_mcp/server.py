@@ -660,7 +660,11 @@ class ToolSpec:
 def _count_lines(text: str) -> int:
     """Count file lines the way ``read_file`` reports ``total_lines``."""
 
-    return text.count("\n") + (1 if text and not text.endswith("\n") else 0)
+    # TextIO's universal-newline iteration treats CRLF, LF, and bare CR as
+    # line boundaries. Normalize only this temporary counting view; the
+    # caller's original bytes are preserved unchanged.
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized.count("\n") + (1 if normalized and not normalized.endswith("\n") else 0)
 
 
 def _patch_evidence(
@@ -786,10 +790,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "apply_patch": ToolSpec(
         title="Apply patch",
         description=(
-            "Stage, validate, and atomically apply a V4A patch envelope. Each hunk locates itself by "
-            "its context, so the context must be unique in the file; when it is not, add a scope header "
-            "(@@ def my_function) naming the enclosing block, or add '*** End of File' to anchor the hunk "
-            "at the end. A blank context line may be written as \"\" or as a single space. Matching is "
+            "Stage, validate, and atomically apply a V4A patch envelope. Hunks are located from a "
+            "forward-only search cursor. `@@ <context>` is a language-agnostic text anchor that advances "
+            "that cursor; it does not name a function or block. A missing anchor fails rather than falling "
+            "back before it. A pure-addition hunk validates its anchor, if any, then appends at EOF. "
+            "`*** End of File` can disambiguate a non-empty hunk at the tail. A blank context line may be "
+            "written as \"\" or as a single space. Matching is "
             "graded exact, then ignoring trailing whitespace, then ignoring indentation width, and the "
             "grade actually used comes back as match_quality. Success returns each file's revision, "
             "total_lines, and changed_ranges. Each operation's primary path may appear only once per "
@@ -3067,14 +3073,13 @@ class Runtime:
                     else:
                         if operation_already_applied:
                             already_applied_operations += 1
-                        # The final staged bytes, rather than only this block's
-                        # input, decide whether a write is necessary. A chain
-                        # of already-applied blocks, or a later block that
-                        # returns an earlier edit to the original bytes, must
-                        # remain a baseline assertion and preserve the mtime.
+                        # The final staged state, rather than only this block's
+                        # input, decides whether a write is necessary. Content
+                        # that returns to the baseline can still require a
+                        # write when a prior move carried a different mode.
                         block_unchanged = updated == content
                         baseline_content = baseline.text(source.display)
-                        net_unchanged = updated == baseline_content
+                        net_unchanged = updated == baseline_content and source_mode == baseline.mode
                         staged[source.display] = StagedFile(
                             source.display,
                             source.path,

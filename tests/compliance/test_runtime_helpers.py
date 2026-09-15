@@ -1857,13 +1857,13 @@ DUPLICATE_SCOPES = 'def greet(n):\n    print("hi")\n\n\ndef farewell(n):\n    pr
 
 
 class PatchLocatorTests(unittest.TestCase):
-    """The `@@` scope anchor, `*** End of File`, and graded matching."""
+    """Forward `@@` anchors, `*** End of File`, and graded matching."""
 
     def test_scope_header_text_is_retained_per_hunk(self) -> None:
         operations = parse_patch(
-            "*** Begin Patch\n*** Update File: a.py\n@@ def farewell\n-x\n+y\n*** End Patch\n"
+            "*** Begin Patch\n*** Update File: a.py\n@@ def farewell(n):\n-x\n+y\n*** End Patch\n"
         )
-        self.assertEqual(operations[0].hunks[0].scope, "def farewell")
+        self.assertEqual(operations[0].hunks[0].scope, "def farewell(n):")
 
     def test_unified_diff_position_header_is_not_treated_as_scope(self) -> None:
         operations = parse_patch(
@@ -1873,7 +1873,7 @@ class PatchLocatorTests(unittest.TestCase):
 
     def test_scope_selects_between_identical_bodies(self) -> None:
         outcome = apply_update_hunks_detailed(
-            DUPLICATE_SCOPES, [PatchHunk(['-    print("hi")', '+    print("bye")'], "def farewell")]
+            DUPLICATE_SCOPES, [PatchHunk(['-    print("hi")', '+    print("bye")'], "def farewell(n):")]
         )
         self.assertEqual(
             outcome.content,
@@ -1902,12 +1902,72 @@ class PatchLocatorTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "PATCH_CONTEXT_NOT_FOUND")
         self.assertEqual(raised.exception.details["scope"], "def missing():")
 
-    def test_scope_warning_is_only_emitted_when_the_scope_narrows_candidates(self) -> None:
+    def test_anchor_can_match_a_later_top_level_line(self) -> None:
+        outcome = apply_update_hunks_detailed(
+            "import os\nimport sys\n\nVALUE = 1\n",
+            [PatchHunk(["-import sys", "+import pathlib"], "import os")],
+        )
+        self.assertEqual(outcome.content, "import os\nimport pathlib\n\nVALUE = 1\n")
+
+    def test_anchor_does_not_assume_indentation_for_javascript(self) -> None:
+        outcome = apply_update_hunks_detailed(
+            'function target() {\nconsole.log("old");\n}\n',
+            [PatchHunk(['-console.log("old");', '+console.log("new");'], "function target() {")],
+        )
+        self.assertEqual(outcome.content, 'function target() {\nconsole.log("new");\n}\n')
+
+    def test_anchor_matching_does_not_use_arbitrary_substrings(self) -> None:
+        content = "def target(name):\n    return name\n"
+        hunk = PatchHunk(["-    return name", "+    return name.upper()"], "def target")
+        with self.assertRaises(ToolFailure) as raised:
+            apply_update_hunks_detailed(content, [hunk])
+        self.assertEqual(raised.exception.code, "PATCH_CONTEXT_NOT_FOUND")
+
+    def test_anchor_only_pure_addition_appends_to_eof(self) -> None:
+        outcome = apply_update_hunks_detailed(
+            "def first():\n    pass\n\ndef second():\n    pass\n",
+            [PatchHunk(["+marker = 1"], "def second():")],
+        )
+        self.assertEqual(
+            outcome.content,
+            "def first():\n    pass\n\ndef second():\n    pass\nmarker = 1\n",
+        )
+
+    def test_context_free_pure_addition_appends_to_eof(self) -> None:
+        outcome = apply_update_hunks_detailed("alpha\n", [["+omega"]])
+        self.assertEqual(outcome.content, "alpha\nomega\n")
+
+    def test_missing_anchor_rejects_pure_addition(self) -> None:
+        content = "def present():\n    pass\n"
+        hunk = PatchHunk(["+marker = 1"], "def missing():")
+        with self.assertRaises(ToolFailure) as raised:
+            apply_update_hunks_detailed(content, [hunk])
+        self.assertEqual(raised.exception.code, "PATCH_CONTEXT_NOT_FOUND")
+        self.assertEqual(raised.exception.details["scope"], "def missing():")
+
+    def test_missing_anchor_rejects_pure_addition_even_with_eof_marker(self) -> None:
+        content = "def present():\n    pass\n"
+        hunk = PatchHunk(["+marker = 1", "*** End of File"], "def missing():")
+        with self.assertRaises(ToolFailure) as raised:
+            apply_update_hunks_detailed(content, [hunk])
+        self.assertEqual(raised.exception.code, "PATCH_CONTEXT_NOT_FOUND")
+
+    def test_later_hunk_cannot_search_before_the_forward_cursor(self) -> None:
+        outcome = apply_update_hunks_detailed(
+            "old\nanchor\nold\nlater\nold\n",
+            [
+                PatchHunk(["-old", "+middle", " later"], "anchor"),
+                PatchHunk(["-old", "+last"]),
+            ],
+        )
+        self.assertEqual(outcome.content, "old\nanchor\nmiddle\nlater\nlast\n")
+
+    def test_exact_anchor_is_not_reported_as_a_degraded_match(self) -> None:
         outcome = apply_update_hunks_detailed(
             "def farewell(n):\n    print('hi')\n",
-            [PatchHunk(["-    print('hi')", "+    print('bye')"], "def farewell")],
+            [PatchHunk(["-    print('hi')", "+    print('bye')"], "def farewell(n):")],
         )
-        self.assertFalse(any("@@ scope" in warning for warning in outcome.warnings))
+        self.assertEqual(outcome.warnings, [])
 
     def test_missing_scope_leaves_identical_bodies_ambiguous(self) -> None:
         with self.assertRaises(ToolFailure) as raised:
@@ -2019,6 +2079,46 @@ class CodexApplyPatchCompatibilityTests(unittest.TestCase):
                 runtime.apply_patch({"patch": patch_text})
             self.assertEqual(raised.exception.code, "PATCH_CONTEXT_NOT_FOUND")
             self.assertEqual(raised.exception.details["scope"], "def second():")
+            self.assertEqual((workspace / "app.py").read_text(encoding="utf-8"), original)
+
+    def test_runtime_anchor_is_a_forward_cursor_not_an_indentation_scope(self) -> None:
+        original = "import os\nimport sys\n\nVALUE = 1\n"
+        patch_text = (
+            "*** Begin Patch\n"
+            "*** Update File: app.py\n"
+            "@@ import os\n"
+            "-import sys\n"
+            "+import pathlib\n"
+            "*** End Patch\n"
+        )
+        with self._runtime(original) as (workspace, runtime):
+            runtime.apply_patch({"patch": patch_text})
+            self.assertEqual(
+                (workspace / "app.py").read_text(encoding="utf-8"),
+                "import os\nimport pathlib\n\nVALUE = 1\n",
+            )
+
+    def test_runtime_pure_addition_validates_anchor_then_appends_to_eof(self) -> None:
+        original = "def present():\n    pass\n"
+        valid = (
+            "*** Begin Patch\n"
+            "*** Update File: app.py\n"
+            "@@ def present():\n"
+            "+marker = 1\n"
+            "*** End Patch\n"
+        )
+        with self._runtime(original) as (workspace, runtime):
+            runtime.apply_patch({"patch": valid})
+            self.assertEqual(
+                (workspace / "app.py").read_text(encoding="utf-8"),
+                "def present():\n    pass\nmarker = 1\n",
+            )
+
+        missing = valid.replace("def present():", "def missing():")
+        with self._runtime(original) as (workspace, runtime):
+            with self.assertRaises(ToolFailure) as raised:
+                runtime.apply_patch({"patch": missing})
+            self.assertEqual(raised.exception.code, "PATCH_CONTEXT_NOT_FOUND")
             self.assertEqual((workspace / "app.py").read_text(encoding="utf-8"), original)
 
     def test_duplicate_add_primary_path_is_rejected_before_writes(self) -> None:
@@ -2223,18 +2323,44 @@ class PatchEvidenceAndIdempotencyTests(unittest.TestCase):
         )
 
     def test_context_free_hunks_are_numbered_where_their_lines_landed(self) -> None:
-        # Two hunks with no context both place at the top of the file, and
-        # back-to-front splicing puts the later one first. The ranges have to
-        # follow the text rather than the hunk order.
+        # Codex-style pure additions append at EOF. When two insertions share
+        # that location, back-to-front splicing preserves hunk order and the
+        # ranges must follow the final text.
         outcome = apply_update_hunks_detailed("z\n", [["+A1", "+A2"], ["+B1"]])
-        self.assertEqual(outcome.content, "B1\nA1\nA2\nz\n")
+        self.assertEqual(outcome.content, "z\nA1\nA2\nB1\n")
         self.assertEqual(
             outcome.changed_ranges,
             [
-                {"start_line": 1, "end_line": 1, "added_lines": 1, "removed_lines": 0},
                 {"start_line": 2, "end_line": 3, "added_lines": 2, "removed_lines": 0},
+                {"start_line": 4, "end_line": 4, "added_lines": 1, "removed_lines": 0},
             ],
         )
+
+    def test_apply_changes_bare_cr_line_count_matches_read_file(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            runtime = Runtime(workspace, permission_mode="safe")
+            try:
+                payload = runtime.apply_changes(
+                    {
+                        "changes": [
+                            {
+                                "action": "create",
+                                "path": "cr.txt",
+                                "content": "one\rtwo\rthree\r",
+                            }
+                        ]
+                    }
+                )
+                read = runtime.read_file({"path": "cr.txt"})
+                raw = (workspace / "cr.txt").read_bytes()
+            finally:
+                runtime.close()
+        evidence = payload["affected_files"][0]
+        self.assertEqual(evidence["total_lines"], 3)
+        self.assertEqual(evidence["changed_ranges"][0]["end_line"], 3)
+        self.assertEqual(read["total_lines"], 3)
+        self.assertEqual(raw, b"one\rtwo\rthree\r")
 
     def test_pure_deletion_reports_an_empty_range_at_the_removal_point(self) -> None:
         outcome = apply_update_hunks_detailed("a\nb\nc\n", [[" a", "-b", " c"]])
@@ -2282,21 +2408,21 @@ class PatchEvidenceAndIdempotencyTests(unittest.TestCase):
         content = "def wrong():\n    marker\n    new\n\ndef target():\n    pass\n"
         hunk = PatchHunk(
             ["     marker", "-    old", "+    new"],
-            "def target",
+            "def target():",
         )
         with self.assertRaises(ToolFailure) as raised:
             apply_update_hunks_detailed(content, [hunk])
         self.assertEqual(raised.exception.code, "PATCH_CONTEXT_NOT_FOUND")
 
-    def test_already_applied_evidence_stops_at_the_next_scope(self) -> None:
+    def test_already_applied_evidence_uses_the_same_forward_anchor_window(self) -> None:
         content = "def target():\n    pass\n\ndef wrong():\n    marker\n    new\n"
         hunk = PatchHunk(
             ["     marker", "-    old", "+    new"],
-            "def target",
+            "def target():",
         )
-        with self.assertRaises(ToolFailure) as raised:
-            apply_update_hunks_detailed(content, [hunk])
-        self.assertEqual(raised.exception.code, "PATCH_CONTEXT_NOT_FOUND")
+        outcome = apply_update_hunks_detailed(content, [hunk])
+        self.assertEqual(outcome.already_applied_hunks, [0])
+        self.assertEqual(outcome.content, content)
 
     def test_already_applied_evidence_must_reach_the_eof_anchor(self) -> None:
         with self.assertRaises(ToolFailure) as raised:

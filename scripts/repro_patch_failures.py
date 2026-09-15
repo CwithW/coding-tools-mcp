@@ -66,15 +66,15 @@ class Case:
 
 CASES: list[Case] = [
     Case(
-        name="C2 scope anchor on the @@ line",
+        name="C2 forward text anchor on the @@ line",
         why=(
-            "`@@ def farewell` must select the second of two identical bodies. "
-            "Parsed-and-discarded scope text made this PATCH_CONTEXT_AMBIGUOUS."
+            "`@@ def farewell(name):` must select the second of two identical bodies. "
+            "Parsed-and-discarded anchor text made this PATCH_CONTEXT_AMBIGUOUS."
         ),
         files={"app.py": DUPLICATE_BODY},
         patch="""*** Begin Patch
 *** Update File: app.py
-@@ def farewell
+@@ def farewell(name):
 -    print("hello")
 +    print("bye")
 *** End Patch

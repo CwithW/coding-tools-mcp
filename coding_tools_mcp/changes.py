@@ -386,7 +386,6 @@ def _placement(edit: LineEdit, lines: list[str], total_lines: int, path: str) ->
         end=edit.end,
         new=list(edit.lines),
         quality="exact",
-        scope_used=False,
         old=lines[edit.start : edit.end],
     )
 
