@@ -695,10 +695,12 @@ def _merge_patch_affected_file(
 ) -> None:
     """Keep one final evidence record per resolved path.
 
-    Same-path update blocks chain through intermediate staged bytes, but only
-    the last bytes are ever committed. Merge placement quality here; once a
-    chain is complete, the caller replaces block-local ranges with a diff from
-    the original baseline to the final staged content.
+    A path staged as an earlier operation's destination can later become a
+    primary update path. Merge placement quality for that chained update; once
+    the chain is complete, the caller replaces block-local ranges with a diff
+    from the original baseline to the final staged content. Full destination
+    overwrites (Add and Move) replace evidence directly instead of using this
+    helper, because evidence from bytes they overwrite is stale.
     """
 
     path = str(entry["path"])
@@ -2946,17 +2948,20 @@ class Runtime:
                         baseline.mode,
                     )
                     added_text = op.add_content or ""
-                    added_range = _whole_file_range(added_text)
-                    if baseline.data is not None and added_range:
-                        added_range[0]["removed_lines"] = len(baseline.data.splitlines())
-                    _merge_patch_affected_file(
-                        affected,
-                        {
-                            "path": target.display,
-                            "operation": "add",
-                            **_patch_evidence(added_text, added_range),
-                        },
-                    )
+                    # Add is a full destination overwrite. Evidence must
+                    # describe the original destination bytes -> final bytes,
+                    # not retain ranges or match quality from an earlier move
+                    # that happened to stage the same destination first.
+                    affected[target.display] = {
+                        "path": target.display,
+                        "operation": "add",
+                        **_patch_evidence(
+                            added_text,
+                            changed_ranges_between(
+                                baseline.text(target.display), added_text
+                            ),
+                        ),
+                    }
                     summaries.append(f"A {target.display}")
                     additions += len(added_text.splitlines())
                     if baseline.data is not None:
@@ -3005,6 +3010,13 @@ class Runtime:
                         if operation_already_applied and dest.display == source.display:
                             already_applied_operations += 1
                         dest_baseline = baseline if dest.display == source.display else FileBaseline.capture(dest.path)
+                        destination_evidence = _patch_evidence(
+                            updated,
+                            changed_ranges_between(
+                                dest_baseline.text(dest.display), updated
+                            ),
+                            quality=outcome.match_quality,
+                        )
                         staged[source.display] = StagedFile(
                             source.display,
                             source.path,
@@ -3019,28 +3031,22 @@ class Runtime:
                             dest_baseline,
                             source_mode,
                         )
-                        if prior is not None and dest.display != source.display:
-                            # Earlier blocks named the source, but only the
-                            # destination exists after this chain commits.
-                            previous_entry = affected.pop(source.display, None)
-                            if previous_entry is not None:
-                                affected[dest.display] = {
-                                    **previous_entry,
-                                    "path": dest.display,
-                                }
-                        _merge_patch_affected_file(
-                            affected,
-                            {
-                                "path": dest.display,
-                                "old_path": source.display,
-                                "operation": "move",
-                                **evidence,
-                            },
-                        )
-                        if prior is not None:
-                            affected[dest.display]["changed_ranges"] = changed_ranges_between(
-                                baseline.text(source.display), updated
-                            )
+                        if dest.display != source.display:
+                            # If this source was an earlier operation's
+                            # destination, it no longer exists after the move.
+                            affected.pop(source.display, None)
+                        # A move is a full destination overwrite. Replace any
+                        # evidence already recorded for the destination and
+                        # describe the original destination baseline -> final
+                        # staged bytes. This keeps revision/ranges/quality from
+                        # referring to different writes when destinations are
+                        # shared by several sources.
+                        affected[dest.display] = {
+                            "path": dest.display,
+                            "old_path": source.display,
+                            "operation": "move",
+                            **destination_evidence,
+                        }
                         summaries.append(f"R {source.display} -> {dest.display}")
                     else:
                         if operation_already_applied:

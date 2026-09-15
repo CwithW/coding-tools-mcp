@@ -71,5 +71,62 @@ source = { editable = "." }
             with self.assertRaisesRegex(SystemExit, "uv.lock project version"):
                 validate_release(root, "v0.2.0")
 
+    def test_release_metadata_rejects_uv_lock_dev_dependency_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_release_tree(root)
+            (root / "pyproject.toml").write_text(
+                """[project]
+version = "0.2.0"
+
+[project.optional-dependencies]
+dev = ["mcp>=2.0", "PyYAML>=6.0"]
+""",
+                encoding="utf-8",
+            )
+            (root / "uv.lock").write_text(
+                """version = 1
+
+[[package]]
+name = "coding-tools-mcp"
+version = "0.2.0"
+source = { editable = "." }
+
+[package.optional-dependencies]
+dev = [{ name = "mcp" }]
+""",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(SystemExit, "uv.lock dev dependencies"):
+                validate_release(root, "v0.2.0")
+
+    def test_release_metadata_normalizes_uv_lock_dev_dependency_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_release_tree(root)
+            (root / "pyproject.toml").write_text(
+                """[project]
+version = "0.2.0"
+
+[project.optional-dependencies]
+dev = ["typing_extensions>=4.0", "PyYAML>=6.0"]
+""",
+                encoding="utf-8",
+            )
+            (root / "uv.lock").write_text(
+                """version = 1
+
+[[package]]
+name = "coding-tools-mcp"
+version = "0.2.0"
+source = { editable = "." }
+
+[package.optional-dependencies]
+dev = [{ name = "typing-extensions" }, { name = "pyyaml" }]
+""",
+                encoding="utf-8",
+            )
+            self.assertEqual(validate_release(root, "v0.2.0"), ("0.2.0", "0.1.0"))
+
 if __name__ == "__main__":
     unittest.main()

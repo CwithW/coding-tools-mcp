@@ -2030,6 +2030,10 @@ class CodexApplyPatchCompatibilityTests(unittest.TestCase):
             self.assertEqual(evidence["path"], "destination.txt")
             self.assertEqual(evidence["old_path"], "app.py")
             self.assertEqual(evidence["operation"], "move")
+            self.assertEqual(
+                evidence["changed_ranges"],
+                [{"start_line": 1, "end_line": 2, "added_lines": 2, "removed_lines": 1}],
+            )
 
     def test_distinct_sources_may_move_to_one_destination_last_write_wins(self) -> None:
         patch_text = (
@@ -2052,12 +2056,56 @@ class CodexApplyPatchCompatibilityTests(unittest.TestCase):
             (workspace / "b.txt").write_text("beta\n", encoding="utf-8")
             runtime = Runtime(workspace, permission_mode="safe")
             try:
-                runtime.apply_patch({"patch": patch_text})
+                payload = runtime.apply_patch({"patch": patch_text})
             finally:
                 runtime.close()
             self.assertFalse((workspace / "a.txt").exists())
             self.assertFalse((workspace / "b.txt").exists())
             self.assertEqual((workspace / "c.txt").read_text(encoding="utf-8"), "BETA\n")
+            self.assertEqual(len(payload["affected_files"]), 1)
+            evidence = payload["affected_files"][0]
+            self.assertEqual(evidence["path"], "c.txt")
+            self.assertEqual(evidence["old_path"], "b.txt")
+            self.assertEqual(evidence["revision"], content_revision("BETA\n"))
+            self.assertEqual(
+                evidence["changed_ranges"],
+                [{"start_line": 1, "end_line": 1, "added_lines": 1, "removed_lines": 0}],
+            )
+            self.assertEqual(evidence["match_quality"], "exact")
+
+    def test_add_after_move_replaces_destination_evidence(self) -> None:
+        patch_text = (
+            "*** Begin Patch\n"
+            "*** Update File: a.txt\n"
+            "*** Move to: c.txt\n"
+            "@@\n"
+            "-alpha\n"
+            "+ALPHA\n"
+            "*** Add File: c.txt\n"
+            "+replacement\n"
+            "*** End Patch\n"
+        )
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "a.txt").write_text("alpha\n", encoding="utf-8")
+            (workspace / "c.txt").write_text("original\n", encoding="utf-8")
+            runtime = Runtime(workspace, permission_mode="safe")
+            try:
+                payload = runtime.apply_patch({"patch": patch_text})
+            finally:
+                runtime.close()
+            self.assertFalse((workspace / "a.txt").exists())
+            self.assertEqual((workspace / "c.txt").read_text(encoding="utf-8"), "replacement\n")
+            self.assertEqual(len(payload["affected_files"]), 1)
+            evidence = payload["affected_files"][0]
+            self.assertEqual(evidence["path"], "c.txt")
+            self.assertEqual(evidence["operation"], "add")
+            self.assertEqual(evidence["revision"], content_revision("replacement\n"))
+            self.assertEqual(
+                evidence["changed_ranges"],
+                [{"start_line": 1, "end_line": 1, "added_lines": 1, "removed_lines": 1}],
+            )
+            self.assertNotIn("match_quality", evidence)
 
 
 
