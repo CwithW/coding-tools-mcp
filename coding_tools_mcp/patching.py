@@ -631,7 +631,16 @@ def _locate_hunk(lines: list[str], hunk: ParsedHunk, index: int, path: str) -> M
         candidates = find_subsequence_all(lines, hunk.old, grade=grade)
         if not candidates:
             continue
-        scoped, scope_used = _filter_by_scope(lines, candidates, hunk.scope)
+        # An explicit @@ scope is a correctness boundary, not a preference.
+        # Falling back to whole-file candidates can silently edit a different
+        # function when the requested scope is missing or its body no longer
+        # matches the patch context.
+        scoped, scope_used = _filter_by_scope(
+            lines,
+            candidates,
+            hunk.scope,
+            strict=hunk.scope is not None,
+        )
         selected = _filter_by_eof(lines, scoped, hunk) if hunk.eof_anchor else scoped
         if len(selected) == 1:
             start = selected[0]

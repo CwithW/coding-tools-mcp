@@ -134,6 +134,21 @@ The v0.5.0 reliability work. Migration notes:
   the file's original line-ending convention is restored, so returned
   `total_lines` and `changed_ranges` stay consistent with a subsequent
   `read_file`.
+- **Named `@@ <scope>` patch anchors are now strict correctness boundaries.** A
+  patch cannot silently fall back to an identical match in another function
+  when the named scope is missing or no longer contains the requested context.
+- **Move evidence and breaker invalidation now follow actual staged
+  mutations.** Moves that change paths retain an explicit source deletion in
+  `affected_files`, and successful workspace-mutation invalidation is derived
+  from committed staged actions rather than compressed display evidence.
+- **Whole-file `apply_changes` evidence now reports line counts consistently.**
+  Rewriting identical content reports zero additions/removals, and replacement
+  ranges count removed lines from the original file.
+- The long-running PTY compliance test now polls the bounded terminal stream
+  for final child output instead of assuming input echo and process output
+  arrive in one response.
+- Cloudflare local `.dev.vars*` and `.env*` files remain ignored after the
+  control-plane move to `infra/cloudflare/`.
 - Release-gate tests now distinguish unavailable Landlock/PTY host capabilities
   from product behavior and no longer race the 16-command concurrency limit
   while testing completed-command retention.

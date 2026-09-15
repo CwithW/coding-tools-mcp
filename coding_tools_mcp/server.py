@@ -1994,6 +1994,7 @@ class Runtime:
             if blocked is not None:
                 raise self._repeat_failure_error(name, blocked)
             payload = handler(args)
+            workspace_mutated = payload.pop("_workspace_mutated", None)
             payload.setdefault("ok", True)
             if payload.get("ok") is False:
                 self._record_breaker_failure(name, fingerprint, payload, breaker_generation)
@@ -2001,7 +2002,7 @@ class Runtime:
                 content = spec.content_builder(payload) if spec.content_builder else None
                 return make_tool_result(name, payload, is_error=True, content=content)
             self.breaker.record_success(name, fingerprint, generation=breaker_generation)
-            if self._workspace_write_landed(name, payload):
+            if self._workspace_write_landed(name, payload, workspace_mutated=workspace_mutated):
                 # A write landed, so every "this call can never succeed"
                 # verdict the breaker holds was reached against a tree that no
                 # longer exists.
@@ -2229,13 +2230,20 @@ class Runtime:
             self._prune_idempotency_results_locked()
 
     @staticmethod
-    def _workspace_write_landed(name: str, payload: dict[str, Any]) -> bool:
+    def _workspace_write_landed(
+        name: str,
+        payload: dict[str, Any],
+        *,
+        workspace_mutated: Any = None,
+    ) -> bool:
         """Whether a structured write tool changed the workspace's net state."""
 
         if name not in WORKSPACE_WRITE_TOOLS or any(
             payload.get(flag) for flag in ("dry_run", "already_applied", "idempotent_replay")
         ):
             return False
+        if isinstance(workspace_mutated, bool):
+            return workspace_mutated
         affected = payload.get("affected_files")
         if not isinstance(affected, list):
             return False
@@ -3033,7 +3041,9 @@ class Runtime:
                         )
                         if dest.display != source.display:
                             # If this source was an earlier operation's
-                            # destination, it no longer exists after the move.
+                            # destination, its old evidence no longer describes
+                            # the final workspace state. Re-add it below as an
+                            # explicit deletion after recording the destination.
                             affected.pop(source.display, None)
                         # A move is a full destination overwrite. Replace any
                         # evidence already recorded for the destination and
@@ -3047,6 +3057,12 @@ class Runtime:
                             "operation": "move",
                             **destination_evidence,
                         }
+                        if dest.display != source.display:
+                            affected[source.display] = {
+                                "path": source.display,
+                                "operation": "delete",
+                                "total_lines": 0,
+                            }
                         summaries.append(f"R {source.display} -> {dest.display}")
                     else:
                         if operation_already_applied:
@@ -3084,6 +3100,7 @@ class Runtime:
                         summaries.append(f"{'=' if block_unchanged else 'M'} {source.display}")
             if not affected:
                 raise ToolFailure("PATCH_FAILED", "No files were modified.", category="validation")
+            workspace_mutated = any(change.action != "verify" for change in staged.values())
             if not dry_run:
                 self._commit_staged_files(list(staged.values()))
         return {
@@ -3099,6 +3116,7 @@ class Runtime:
             "additions": additions,
             "removals": removals,
             "warnings": warnings,
+            "_workspace_mutated": workspace_mutated and not dry_run,
         }
 
     def apply_changes(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -3137,6 +3155,7 @@ class Runtime:
                 unchanged_files += entry["operation"] == "unchanged"
             if not affected:
                 raise ToolFailure("PATCH_FAILED", "No files were modified.", category="validation")
+            workspace_mutated = any(change.action != "verify" for change in staged.values())
             if not dry_run:
                 self._commit_staged_files(list(staged.values()))
         return {
@@ -3149,6 +3168,7 @@ class Runtime:
             "additions": additions,
             "removals": removals,
             "warnings": warnings,
+            "_workspace_mutated": workspace_mutated and not dry_run,
         }
 
     def _resolve_change_paths(self, change: ChangeRequest) -> list[tuple[int, str]]:
@@ -3197,11 +3217,13 @@ class Runtime:
             action="verify" if unchanged else "write",
         )
         operation = "unchanged" if unchanged else ("create" if current is None else "write")
-        ranges: list[dict[str, int]] = [] if unchanged else _whole_file_range(content)
+        ranges: list[dict[str, int]] = (
+            [] if unchanged else changed_ranges_between(current or "", content)
+        )
         entry = {"path": target.display, "operation": operation, **_patch_evidence(content, ranges)}
         marker = {"unchanged": "=", "create": "A"}.get(operation, "M")
         return entry, f"{marker} {target.display}", 0 if unchanged else _count_lines(content), (
-            0 if current is None else _count_lines(current)
+            0 if unchanged or current is None else _count_lines(current)
         )
 
     def _stage_edited_file(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
@@ -127,6 +128,25 @@ dev = [{ name = "typing-extensions" }, { name = "pyyaml" }]
                 encoding="utf-8",
             )
             self.assertEqual(validate_release(root, "v0.2.0"), ("0.2.0", "0.1.0"))
+
+
+class RepositoryHygieneTests(unittest.TestCase):
+    def test_cloudflare_local_secret_files_are_ignored_after_infra_move(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        paths = [
+            "infra/cloudflare/sandbox-control/.dev.vars",
+            "infra/cloudflare/sandbox-control/.dev.vars.local",
+            "infra/cloudflare/sandbox-control/.env",
+            "infra/cloudflare/sandbox-control/.env.local",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                result = subprocess.run(
+                    ["git", "check-ignore", "--quiet", "--no-index", path],
+                    cwd=root,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, f"{path} must be ignored")
 
 if __name__ == "__main__":
     unittest.main()

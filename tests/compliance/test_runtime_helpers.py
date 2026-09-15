@@ -1880,6 +1880,28 @@ class PatchLocatorTests(unittest.TestCase):
             'def greet(n):\n    print("hi")\n\n\ndef farewell(n):\n    print("bye")\n',
         )
 
+    def test_named_scope_does_not_fall_back_to_a_match_in_another_function(self) -> None:
+        content = 'def first():\n    return "old"\n\ndef second():\n    return "newer"\n'
+        hunk = PatchHunk(
+            ['-    return "old"', '+    return "changed"'],
+            "def second():",
+        )
+        with self.assertRaises(ToolFailure) as raised:
+            apply_update_hunks_detailed(content, [hunk])
+        self.assertEqual(raised.exception.code, "PATCH_CONTEXT_NOT_FOUND")
+        self.assertEqual(raised.exception.details["scope"], "def second():")
+
+    def test_nonexistent_named_scope_does_not_fall_back_to_the_whole_file(self) -> None:
+        content = 'def first():\n    return "old"\n'
+        hunk = PatchHunk(
+            ['-    return "old"', '+    return "changed"'],
+            "def missing():",
+        )
+        with self.assertRaises(ToolFailure) as raised:
+            apply_update_hunks_detailed(content, [hunk])
+        self.assertEqual(raised.exception.code, "PATCH_CONTEXT_NOT_FOUND")
+        self.assertEqual(raised.exception.details["scope"], "def missing():")
+
     def test_scope_warning_is_only_emitted_when_the_scope_narrows_candidates(self) -> None:
         outcome = apply_update_hunks_detailed(
             "def farewell(n):\n    print('hi')\n",
@@ -1982,6 +2004,23 @@ class CodexApplyPatchCompatibilityTests(unittest.TestCase):
             self.assertEqual(raised.exception.details["operation_indexes"], [0, 1])
             self.assertEqual((workspace / "app.py").read_text(encoding="utf-8"), "one\ntwo\n")
 
+    def test_named_scope_cannot_modify_a_match_in_another_function(self) -> None:
+        original = 'def first():\n    return "old"\n\ndef second():\n    return "newer"\n'
+        patch_text = (
+            "*** Begin Patch\n"
+            "*** Update File: app.py\n"
+            "@@ def second():\n"
+            '-    return "old"\n'
+            '+    return "changed"\n'
+            "*** End Patch\n"
+        )
+        with self._runtime(original) as (workspace, runtime):
+            with self.assertRaises(ToolFailure) as raised:
+                runtime.apply_patch({"patch": patch_text})
+            self.assertEqual(raised.exception.code, "PATCH_CONTEXT_NOT_FOUND")
+            self.assertEqual(raised.exception.details["scope"], "def second():")
+            self.assertEqual((workspace / "app.py").read_text(encoding="utf-8"), original)
+
     def test_duplicate_add_primary_path_is_rejected_before_writes(self) -> None:
         patch_text = (
             "*** Begin Patch\n"
@@ -2062,7 +2101,7 @@ class CodexApplyPatchCompatibilityTests(unittest.TestCase):
             self.assertFalse((workspace / "a.txt").exists())
             self.assertFalse((workspace / "b.txt").exists())
             self.assertEqual((workspace / "c.txt").read_text(encoding="utf-8"), "BETA\n")
-            self.assertEqual(len(payload["affected_files"]), 1)
+            self.assertEqual(len(payload["affected_files"]), 3)
             evidence = payload["affected_files"][0]
             self.assertEqual(evidence["path"], "c.txt")
             self.assertEqual(evidence["old_path"], "b.txt")
@@ -2072,6 +2111,12 @@ class CodexApplyPatchCompatibilityTests(unittest.TestCase):
                 [{"start_line": 1, "end_line": 1, "added_lines": 1, "removed_lines": 0}],
             )
             self.assertEqual(evidence["match_quality"], "exact")
+            deleted = {
+                entry["path"]
+                for entry in payload["affected_files"]
+                if entry["operation"] == "delete"
+            }
+            self.assertEqual(deleted, {"a.txt", "b.txt"})
 
     def test_add_after_move_replaces_destination_evidence(self) -> None:
         patch_text = (
@@ -2096,7 +2141,7 @@ class CodexApplyPatchCompatibilityTests(unittest.TestCase):
                 runtime.close()
             self.assertFalse((workspace / "a.txt").exists())
             self.assertEqual((workspace / "c.txt").read_text(encoding="utf-8"), "replacement\n")
-            self.assertEqual(len(payload["affected_files"]), 1)
+            self.assertEqual(len(payload["affected_files"]), 2)
             evidence = payload["affected_files"][0]
             self.assertEqual(evidence["path"], "c.txt")
             self.assertEqual(evidence["operation"], "add")
@@ -2106,6 +2151,10 @@ class CodexApplyPatchCompatibilityTests(unittest.TestCase):
                 [{"start_line": 1, "end_line": 1, "added_lines": 1, "removed_lines": 1}],
             )
             self.assertNotIn("match_quality", evidence)
+            self.assertEqual(
+                payload["affected_files"][1],
+                {"path": "a.txt", "operation": "delete", "total_lines": 0},
+            )
 
 
 
@@ -2117,6 +2166,60 @@ class PatchEvidenceAndIdempotencyTests(unittest.TestCase):
         self.assertEqual(
             outcome.changed_ranges,
             [{"start_line": 2, "end_line": 2, "added_lines": 1, "removed_lines": 1}],
+        )
+
+    def test_apply_changes_unchanged_full_write_reports_zero_line_changes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            content = "one\ntwo\n"
+            (workspace / "same.txt").write_text(content, encoding="utf-8")
+            runtime = Runtime(workspace, permission_mode="safe")
+            try:
+                payload = runtime.apply_changes(
+                    {
+                        "changes": [
+                            {
+                                "action": "write",
+                                "path": "same.txt",
+                                "revision": content_revision(content),
+                                "content": content,
+                            }
+                        ]
+                    }
+                )
+            finally:
+                runtime.close()
+        self.assertIs(payload["already_applied"], True)
+        self.assertEqual(payload["additions"], 0)
+        self.assertEqual(payload["removals"], 0)
+        self.assertEqual(payload["affected_files"][0]["changed_ranges"], [])
+
+    def test_apply_changes_full_write_range_counts_removed_lines(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            before = "one\ntwo\nthree\n"
+            (workspace / "replace.txt").write_text(before, encoding="utf-8")
+            runtime = Runtime(workspace, permission_mode="safe")
+            try:
+                payload = runtime.apply_changes(
+                    {
+                        "changes": [
+                            {
+                                "action": "write",
+                                "path": "replace.txt",
+                                "revision": content_revision(before),
+                                "content": "new\n",
+                            }
+                        ]
+                    }
+                )
+            finally:
+                runtime.close()
+        self.assertEqual(payload["additions"], 1)
+        self.assertEqual(payload["removals"], 3)
+        self.assertEqual(
+            payload["affected_files"][0]["changed_ranges"],
+            [{"start_line": 1, "end_line": 1, "added_lines": 1, "removed_lines": 3}],
         )
 
     def test_context_free_hunks_are_numbered_where_their_lines_landed(self) -> None:
