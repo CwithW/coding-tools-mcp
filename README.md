@@ -133,15 +133,15 @@ speak MCP to this server and inherit the whole safety boundary. →
 
 ## The tool catalog
 
-The registry contains 19 truthfully annotated tools. The default `safe` and
-`trusted` modes advertise 18; `dangerous` also advertises
+The registry contains 21 truthfully annotated tools. The default `safe` and
+`trusted` modes advertise 20; `dangerous` also advertises
 `request_permissions`, the only mode in which that tool can grant anything.
 `apply_patch` and `apply_changes` are the file-mutation primitives: both are
 staged, baseline-checked, atomic across files, and support rollback.
 
 | Group | Tools |
 | --- | --- |
-| Files & search | `read_file` · `list_dir` · `list_files` · `search_text` · `apply_patch` · `apply_changes` · `view_image` |
+| Files & search | `read_file` · `list_dir` · `list_files` · `search_text` · `import_file` · `export_file` · `apply_patch` · `apply_changes` · `view_image` |
 | Execution | `exec_command` · `write_stdin` · `read_output` · `kill_command` · `request_permissions` (`dangerous` only) |
 | Git | `git_status` · `git_diff` · `git_log` · `git_show` · `git_blame` |
 | Runtime | `server_info` · `check_exec_environment` |

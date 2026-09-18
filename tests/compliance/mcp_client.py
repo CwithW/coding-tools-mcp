@@ -29,6 +29,8 @@ REQUIRED_TOOLS = (
     "list_dir",
     "list_files",
     "search_text",
+    "import_file",
+    "export_file",
     "apply_patch",
     "apply_changes",
     "exec_command",

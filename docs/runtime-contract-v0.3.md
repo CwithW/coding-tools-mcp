@@ -302,7 +302,7 @@ Retry: This command_id has expired or never existed; …
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "BINARY_FILE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "COMMAND_SPAWN_FAILED", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "IDEMPOTENCY_KEY_REUSED", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "REPEATED_CALL_BLOCKED", "REVISION_MISMATCH", "REVISION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
+["ABSOLUTE_PATH_DENIED", "ALREADY_EXISTS", "BINARY_FILE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "COMMAND_SPAWN_FAILED", "DOWNLOAD_FAILED", "ELICITATION_UNSUPPORTED", "FILE_TOO_LARGE", "GIT_ERROR", "IDEMPOTENCY_KEY_REUSED", "INTERNAL_ERROR", "INVALID_ARGUMENT", "INVALID_CONFIGURATION", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_A_FILE", "NOT_FOUND", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "REPEATED_CALL_BLOCKED", "REVISION_MISMATCH", "REVISION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
@@ -401,7 +401,7 @@ survive tunnel churn. Forwarded headers are ignored unless
 
 ## Stable tool inventory
 
-The default catalog has 18 tools, including `view_image`. Setting
+The default catalog has 20 tools, including `view_image`. Setting
 `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` is the sole installation capability gate
 and removes only that optional binary-content tool. It is not a tool profile.
 
@@ -492,6 +492,28 @@ Annotations: `{"title":"Search text","readOnlyHint":true,"destructiveHint":false
 
 Ripgrep output is consumed incrementally and the process stops once the result
 cap is known to be exceeded. `context_lines=0` does not reread matching files.
+
+### import_file
+
+Inputs: `"file"`, `"destination"`, `"overwrite"`, `"max_bytes"`.
+
+Annotations: `{"title":"Import ChatGPT file","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}`.
+
+Downloads the HTTPS URL resolved by ChatGPT's `openai/fileParams` integration
+into a workspace-confined destination. The transfer is streamed through a
+same-directory temporary file, bounded by `max_bytes`, fsynced, and atomically
+installed. Existing destinations require `overwrite=true`.
+
+### export_file
+
+Inputs: `"path"`, `"file_name"`, `"ttl_seconds"`.
+
+Annotations: `{"title":"Export workspace file","readOnlyHint":true,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}`.
+
+Returns one MCP `resource_link` whose externally reachable HTTPS URL contains
+an unguessable, process-local token. The token expires after `ttl_seconds`
+(`60..3600`), is valid only while the source remains a safe regular workspace
+file, and is served with `Cache-Control: private, no-store`.
 
 ### apply_patch
 

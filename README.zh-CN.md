@@ -121,14 +121,14 @@ coding-tools-mcp-desktop
 
 ## 工具目录
 
-注册表包含 19 个如实标注的工具。默认的 `safe` 与 `trusted` 模式对外声明
-18 个；`dangerous` 还会声明 `request_permissions`，也只有该模式下这个工具
+注册表包含 21 个如实标注的工具。默认的 `safe` 与 `trusted` 模式对外声明
+20 个；`dangerous` 还会声明 `request_permissions`，也只有该模式下这个工具
 才能授予权限。`apply_patch` 与 `apply_changes` 都是文件修改原语：分阶段、
 基线校验、跨文件原子提交并支持回滚。
 
 | 分组 | 工具 |
 | --- | --- |
-| 文件与搜索 | `read_file` · `list_dir` · `list_files` · `search_text` · `apply_patch` · `apply_changes` · `view_image` |
+| 文件与搜索 | `read_file` · `list_dir` · `list_files` · `search_text` · `import_file` · `export_file` · `apply_patch` · `apply_changes` · `view_image` |
 | 执行 | `exec_command` · `write_stdin` · `read_output` · `kill_command` · `request_permissions`（仅 `dangerous`） |
 | Git | `git_status` · `git_diff` · `git_log` · `git_show` · `git_blame` |
 | 运行时 | `server_info` · `check_exec_environment` |

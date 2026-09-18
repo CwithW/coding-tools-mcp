@@ -236,6 +236,8 @@ class MCPContractTests(ComplianceTestCase):
             "list_dir": (True, False, True, False),
             "list_files": (True, False, True, False),
             "search_text": (True, False, True, False),
+            "import_file": (False, True, False, True),
+            "export_file": (True, False, False, True),
             "apply_patch": (False, True, False, False),
             "apply_changes": (False, True, False, False),
             "exec_command": (False, True, False, True),

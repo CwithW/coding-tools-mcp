@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import io
 import os
 import signal
 import shutil
@@ -940,6 +941,74 @@ Maven home: /usr/share/maven
             apply_patch_tool = next(tool for tool in first if tool["name"] == "apply_patch")
             self.assertIs(apply_patch_tool["annotations"].get("destructiveHint"), True)
             self.assertIs(apply_patch_tool["annotations"].get("readOnlyHint"), False)
+
+    def test_import_file_downloads_chatgpt_attachment_into_workspace(self) -> None:
+        class FakeResponse(io.BytesIO):
+            def __init__(self, content: bytes) -> None:
+                super().__init__(content)
+                self.headers = {"Content-Length": str(len(content))}
+
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            content = b"uploaded from ChatGPT\n"
+            runtime = Runtime(workspace)
+            with patch.object(
+                server_module.urllib.request,
+                "urlopen",
+                return_value=FakeResponse(content),
+            ):
+                result = runtime.call_tool(
+                    "import_file",
+                    {
+                        "file": {
+                            "download_url": "https://files.example.invalid/download",
+                            "file_id": "file-123",
+                            "file_name": "example.txt",
+                            "mime_type": "text/plain",
+                        },
+                        "destination": "uploads/example.txt",
+                    },
+                )
+
+            payload = result["structuredContent"]
+            self.assertIs(result.get("isError"), False)
+            self.assertEqual((workspace / "uploads/example.txt").read_bytes(), content)
+            self.assertEqual(payload.get("path"), "uploads/example.txt")
+            self.assertEqual(payload.get("bytes"), len(content))
+            self.assertEqual(payload.get("file_id"), "file-123")
+            definition = server_module.tool_definition("import_file")
+            self.assertEqual(definition.get("_meta"), {"openai/fileParams": ["file"]})
+
+    def test_export_file_returns_short_lived_resource_link(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            content = b"artifact bytes"
+            (workspace / "artifact.bin").write_bytes(content)
+            runtime = Runtime(workspace)
+            with patch.dict(
+                server_module.os.environ,
+                {"CODING_TOOLS_MCP_SERVER_URL": "https://mcp.example.invalid"},
+            ):
+                result = runtime.call_tool(
+                    "export_file",
+                    {"path": "artifact.bin", "file_name": "result.bin", "ttl_seconds": 60},
+                )
+
+            payload = result["structuredContent"]
+            links = [item for item in result["content"] if item.get("type") == "resource_link"]
+            self.assertIs(result.get("isError"), False)
+            self.assertEqual(payload.get("path"), "artifact.bin")
+            self.assertEqual(payload.get("bytes"), len(content))
+            self.assertEqual(len(links), 1)
+            self.assertEqual(links[0].get("name"), "result.bin")
+            uri = str(links[0].get("uri"))
+            self.assertTrue(uri.startswith("https://mcp.example.invalid/download/"), uri)
+            token = server_module.urllib.parse.urlparse(uri).path.split("/")[2]
+            exported = runtime.resolve_export_token(token)
+            self.assertIsNotNone(exported)
+            assert exported is not None
+            self.assertEqual(exported[0], workspace / "artifact.bin")
+            self.assertEqual(exported[1], "result.bin")
 
     def test_agent_text_matches_per_tool_limits_without_renderer_truncation(self) -> None:
         # Per-call tool limits (here read_file max_bytes) are the only budget:

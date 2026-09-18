@@ -6,8 +6,8 @@ properties, annotations, and error codes with the contract.
 
 ## Fixed inventory
 
-The registry holds exactly 19 tools. Two are gated, so a default `tools/list`
-advertises 18:
+The registry holds exactly 21 tools. Two are gated, so a default `tools/list`
+advertises 20:
 
 - `server_info`: server, workspace, automatic project context, policy, runtime,
   auth, protocol, and fixed-catalog metadata.
@@ -17,6 +17,9 @@ advertises 18:
 - `list_files`: iterate files with glob, ignore, hidden-file, sort, and cap
   controls.
 - `search_text`: literal or regex search; ripgrep stops after the result cap.
+- `import_file`: download a ChatGPT-native attachment into the workspace.
+- `export_file`: expose a workspace file through a short-lived HTTPS
+  `resource_link`.
 - `apply_patch`: stage and atomically commit add/update/delete/move envelopes.
 - `apply_changes`: line-addressed create/write/edit/delete/move/copy against a
   known file revision.
@@ -44,7 +47,7 @@ Two gates apply, and they are not tool profiles:
   stays reachable by name in every mode, so removing it from the catalog does
   not break a client that calls it anyway.
 
-The remaining 17 tools are always advertised, and `listChanged` is `false`.
+The remaining 19 tools are always advertised, and `listChanged` is `false`.
 
 Each tool declares its own `outputSchema` naming the fields it actually
 returns — `command_id`, `exit_code`, `output_ref`, `revision`,
@@ -73,6 +76,9 @@ present. Errors use the same envelope with readable recovery guidance and
 `view_image` is the exception to text-only content: its base64 appears exactly
 once in one `image` block. `structuredContent` contains path, media type, byte
 count, dimensions, resize metadata, and warnings, but no base64 or data URL.
+`export_file` similarly adds one `resource_link` content block. Its URL is
+short-lived and tokenized; callers should use a fresh export instead of
+caching an expired URL.
 
 ## Patch behavior
 

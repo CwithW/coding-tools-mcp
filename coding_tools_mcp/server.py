@@ -26,6 +26,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import urllib.request
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -230,7 +231,7 @@ MAX_UNTRACKED_DIFF_FILES = 100
 IDEMPOTENT_TOOLS = frozenset({"apply_patch", "apply_changes"})
 # The write primitives. A success here changes the tree every other tool reads,
 # which is what makes a previously deterministic failure worth re-attempting.
-WORKSPACE_WRITE_TOOLS = frozenset({"apply_patch", "apply_changes"})
+WORKSPACE_WRITE_TOOLS = frozenset({"apply_patch", "apply_changes", "import_file"})
 IDEMPOTENCY_CACHE_ENTRIES = 64
 IDEMPOTENCY_KEY_MAX_LENGTH = 128
 # Command ids remembered only to keep one finished command from being counted
@@ -744,6 +745,22 @@ def _image_content(payload: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _export_file_content(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    uri = str(payload.pop("_resource_uri", ""))
+    return [
+        {
+            "type": "resource_link",
+            "uri": uri,
+            "name": str(payload.get("file_name") or payload.get("path") or "download"),
+            "title": str(payload.get("file_name") or "Exported file"),
+            "description": "File exported from the Coding Tools workspace.",
+            "mimeType": str(payload.get("mime_type") or "application/octet-stream"),
+            "size": int(payload.get("bytes") or 0),
+            "annotations": {"audience": ["user"], "priority": 1.0},
+        }
+    ]
+
+
 TOOL_REGISTRY: dict[str, ToolSpec] = {
     "server_info": ToolSpec(
         title="Server info",
@@ -780,6 +797,28 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="Search UTF-8 workspace files for text or regex matches.",
         read_only=True,
         idempotent=True,
+    ),
+    "import_file": ToolSpec(
+        title="Import ChatGPT file",
+        description=(
+            "Import a ChatGPT-native conversation file into the persistent Coding Tools workspace. "
+            "ChatGPT resolves the model-visible file reference through openai/fileParams before the MCP call reaches this server. "
+            "Use this after a user upload, for assistant-generated chat attachments that have already been registered by the ChatGPT backend and therefore have a native file_id, and for files created inside ChatGPT Data Analysis Python environment (the stateful Jupyter notebook environment used for data analysis) when those files are available in the session sandbox. In this ChatGPT runtime, passing a sandbox path such as /mnt/data/example.txt as the file argument causes the host to register/resolve that local file into the openai/fileParams attachment object before this MCP call reaches the server. Assistant-generated chat attachments normally become discoverable through the conversation Files layer only after the assistant message containing the attachment has been committed and the user sends the next turn. destination is optional and overwrite defaults to false. After success, use the returned workspace path with read_file, exec_command, apply_changes, or other Coding Tools. Prefer this over manually reconstructing attachment bytes when a native ChatGPT file reference or Data Analysis sandbox file is available."
+        ),
+        destructive=True,
+        open_world=True,
+    ),
+    "export_file": ToolSpec(
+        title="Export workspace file",
+        description=(
+            "Expose a workspace file as a standard MCP resource_link backed by a short-lived HTTPS download URL. "
+            "Use this when a user needs a file produced in the persistent Coding Tools workspace. The resource_link alone does not create a ChatGPT-native conversation file and does not mount the file into ChatGPT built-in execution sandbox / terminal tool python_user_visible. "
+            "Important: python_user_visible uses the ChatGPT built-in execution sandbox, typically under /mnt/data, and has no internet access, so it cannot directly retrieve the temporary HTTPS URL. The verified bridge is two-turn: obtain the exact exported bytes by a host-side bridge, stage those same bytes in the ChatGPT sandbox, and send that sandbox file as an assistant attachment in the chat. Do not expect a native file_id during that same assistant turn. After the attachment message is committed and the user sends the next turn, query conversation Files to locate the assistant-generated attachment and obtain its native file_id; then call files.materialize with raw_file representation to place it into /mnt/data or another target sandbox directory. "
+            "Recommended transport flow into the built-in terminal: export_file -> stage the exact bytes in the ChatGPT sandbox -> send that sandbox file as an assistant attachment -> finish the assistant turn -> on the next user turn use files.list or files.search to obtain the attachment native file_id -> files.materialize(raw_file) into /mnt/data -> verify size/hash with python_user_visible. Once native, the file can also be passed back to import_file through openai/fileParams. Call export_file again rather than caching an expired URL."
+        ),
+        read_only=True,
+        open_world=True,
+        content_builder=_export_file_content,
     ),
     "apply_patch": ToolSpec(
         title="Apply patch",
@@ -1579,6 +1618,8 @@ class Runtime:
         # re-reading retained output must not invalidate them again.
         self._breaker_reset_commands: OrderedDict[str, None] = OrderedDict()
         self._breaker_reset_commands_lock = threading.Lock()
+        self._export_tokens: dict[str, tuple[Path, float, str, str, int]] = {}
+        self._export_tokens_lock = threading.Lock()
         self.breaker = RepeatFailureBreaker()
         # ProjectContext is frozen and derived only from the workspace tree, so
         # an embedder that builds several runtimes over one workspace can reuse
@@ -2480,6 +2521,177 @@ class Runtime:
                 },
             }
         return result
+
+    def import_file(self, args: dict[str, Any]) -> dict[str, Any]:
+        file_arg = args.get("file")
+        if not isinstance(file_arg, dict):
+            raise ToolFailure("INVALID_ARGUMENT", "file is required.", category="validation")
+        download_url = str(file_arg.get("download_url") or "")
+        file_id = str(file_arg.get("file_id") or "")
+        if not download_url or not file_id:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "file.download_url and file.file_id are required.",
+                category="validation",
+            )
+        try:
+            parsed = urllib.parse.urlparse(download_url)
+        except ValueError as exc:
+            raise ToolFailure("INVALID_ARGUMENT", "file.download_url is invalid.", category="validation") from exc
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "file.download_url must be an HTTPS URL.",
+                category="validation",
+            )
+
+        supplied_name = str(file_arg.get("file_name") or "").strip()
+        fallback_name = file_id.replace("/", "_").replace("\\", "_")
+        default_name = Path(supplied_name).name if supplied_name else fallback_name
+        raw_destination = str(args.get("destination") or default_name)
+        resolved = self.resolve_for_write(raw_destination)
+        overwrite = bool(args.get("overwrite", False))
+        max_bytes = int(args.get("max_bytes", 536870912))
+        if resolved.path.exists() and not overwrite:
+            raise ToolFailure(
+                "ALREADY_EXISTS",
+                "Destination already exists; set overwrite=true or choose another destination.",
+                category="validation",
+                details={"path": resolved.display},
+            )
+        resolved.path.parent.mkdir(parents=True, exist_ok=True)
+
+        request = urllib.request.Request(download_url, headers={"User-Agent": f"{SERVER_NAME}/{__version__}"})
+        temp_path: Path | None = None
+        total = 0
+        digest = hashlib.sha256()
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                content_length = response.headers.get("Content-Length")
+                if content_length:
+                    try:
+                        announced = int(content_length)
+                    except ValueError:
+                        announced = 0
+                    if announced > max_bytes:
+                        raise ToolFailure(
+                            "FILE_TOO_LARGE",
+                            "Attachment exceeds max_bytes.",
+                            category="validation",
+                            details={"content_length": announced, "max_bytes": max_bytes},
+                        )
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    prefix=f".{resolved.path.name}.",
+                    suffix=".part",
+                    dir=resolved.path.parent,
+                    delete=False,
+                ) as handle:
+                    temp_path = Path(handle.name)
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise ToolFailure(
+                                "FILE_TOO_LARGE",
+                                "Attachment exceeds max_bytes.",
+                                category="validation",
+                                details={"bytes_received": total, "max_bytes": max_bytes},
+                            )
+                        handle.write(chunk)
+                        digest.update(chunk)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            os.replace(temp_path, resolved.path)
+            temp_path = None
+        except ToolFailure:
+            raise
+        except Exception as exc:
+            raise ToolFailure(
+                "DOWNLOAD_FAILED",
+                f"Attachment download failed: {exc}",
+                category="network",
+                retryable=True,
+                details={"host": parsed.hostname},
+            ) from exc
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+        return {
+            "path": resolved.display,
+            "bytes": total,
+            "sha256": digest.hexdigest(),
+            "file_id": file_id,
+            "file_name": supplied_name or None,
+            "mime_type": file_arg.get("mime_type"),
+            "overwritten": overwrite,
+        }
+
+    def export_file(self, args: dict[str, Any]) -> dict[str, Any]:
+        resolved = self.resolve_existing(str(args.get("path", "")))
+        if resolved.path.is_dir():
+            raise ToolFailure("IS_DIRECTORY", "Path is a directory.", category="validation")
+        if not resolved.path.is_file():
+            raise ToolFailure("NOT_A_FILE", "Path is not a regular file.", category="validation")
+        server_url = os.environ.get(f"{ENV_PREFIX}_SERVER_URL", "").rstrip("/")
+        try:
+            parsed_server = urllib.parse.urlparse(server_url)
+        except ValueError as exc:
+            raise ToolFailure("INVALID_CONFIGURATION", "Server URL is invalid.", category="internal") from exc
+        if parsed_server.scheme != "https" or not parsed_server.hostname:
+            raise ToolFailure(
+                "INVALID_CONFIGURATION",
+                f"{ENV_PREFIX}_SERVER_URL must be an externally reachable HTTPS URL.",
+                category="internal",
+            )
+        ttl_seconds = int(args.get("ttl_seconds", 900))
+        supplied_name = str(args.get("file_name") or "").strip()
+        file_name = Path(supplied_name).name if supplied_name else resolved.path.name
+        if not file_name:
+            file_name = "download"
+        mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+        size = resolved.path.stat().st_size
+        token = secrets.token_urlsafe(32)
+        expires_at = time.time() + ttl_seconds
+        with self._export_tokens_lock:
+            now = time.time()
+            expired = [key for key, item in self._export_tokens.items() if item[1] <= now]
+            for key in expired:
+                self._export_tokens.pop(key, None)
+            self._export_tokens[token] = (resolved.path, expires_at, file_name, mime_type, size)
+        quoted_name = urllib.parse.quote(file_name, safe="")
+        uri = f"{server_url}/download/{token}/{quoted_name}"
+        return {
+            "path": resolved.display,
+            "file_name": file_name,
+            "mime_type": mime_type,
+            "bytes": size,
+            "expires_at": datetime.fromtimestamp(expires_at, timezone.utc).isoformat().replace("+00:00", "Z"),
+            "_resource_uri": uri,
+        }
+
+    def resolve_export_token(self, token: str) -> tuple[Path, str, str, int] | None:
+        now = time.time()
+        with self._export_tokens_lock:
+            item = self._export_tokens.get(token)
+            if item is None:
+                return None
+            path, expires_at, file_name, mime_type, size = item
+            if expires_at <= now:
+                self._export_tokens.pop(token, None)
+                return None
+        try:
+            if not path.is_file() or not self.workspace.is_safe_existing_path(path):
+                return None
+        except OSError:
+            return None
+        return path, file_name, mime_type, size
 
     def list_dir(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", ".")))
@@ -5691,6 +5903,22 @@ def output_schemas() -> dict[str, dict[str, Any]]:
             "engine": string,
             **truncation,
         },
+        "import_file": {
+            "path": string,
+            "bytes": integer,
+            "sha256": string,
+            "file_id": string,
+            "file_name": nullable_string,
+            "mime_type": nullable_string,
+            "overwritten": boolean,
+        },
+        "export_file": {
+            "path": string,
+            "file_name": string,
+            "mime_type": string,
+            "bytes": integer,
+            "expires_at": string,
+        },
         "apply_patch": patch_result,
         "apply_changes": patch_result,
         "exec_command": {**command_result, "elapsed_ms": integer},
@@ -5845,7 +6073,7 @@ def schema_type_name(expected_type: str | list[str]) -> str:
 def tool_definition(name: str, *, fake_readonly: bool = False) -> dict[str, Any]:
     schemas = input_schemas()
     annotations = tool_annotations(name, fake_readonly=fake_readonly)
-    return {
+    definition = {
         "name": name,
         "title": annotations["title"],
         "description": TOOL_REGISTRY[name].description,
@@ -5853,6 +6081,9 @@ def tool_definition(name: str, *, fake_readonly: bool = False) -> dict[str, Any]
         "outputSchema": tool_output_schema(name),
         "annotations": annotations,
     }
+    if name == "import_file":
+        definition["_meta"] = {"openai/fileParams": ["file"]}
+    return definition
 
 
 def tool_annotations(name: str, *, fake_readonly: bool = False) -> dict[str, Any]:
@@ -5942,6 +6173,31 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "max_preview_bytes": {**integer, "minimum": 80, "maximum": 4096, "default": 512},
             },
             ["query"],
+        ),
+        "import_file": object_schema(
+            {
+                "file": object_schema(
+                    {
+                        "download_url": {**string, "minLength": 1},
+                        "file_id": {**string, "minLength": 1},
+                        "mime_type": string,
+                        "file_name": string,
+                    },
+                    ["download_url", "file_id"],
+                ),
+                "destination": {**string, "minLength": 1},
+                "overwrite": {**boolean, "default": False},
+                "max_bytes": {**integer, "minimum": 1, "maximum": 2147483648, "default": 536870912},
+            },
+            ["file"],
+        ),
+        "export_file": object_schema(
+            {
+                "path": {**string, "minLength": 1},
+                "file_name": {**string, "minLength": 1},
+                "ttl_seconds": {**integer, "minimum": 60, "maximum": 3600, "default": 900},
+            },
+            ["path"],
         ),
         "apply_patch": object_schema(
             {
@@ -6323,10 +6579,48 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def do_GET(self) -> None:
+        if self.path.split("?", 1)[0].startswith("/download/"):
+            self.handle_export_download(head_only=False)
+            return
         self.handle_metadata_request(head_only=False)
 
     def do_HEAD(self) -> None:
+        if self.path.split("?", 1)[0].startswith("/download/"):
+            self.handle_export_download(head_only=True)
+            return
         self.handle_metadata_request(head_only=True)
+
+    def handle_export_download(self, *, head_only: bool) -> None:
+        request_path = self.path.split("?", 1)[0]
+        parts = request_path.split("/", 3)
+        if len(parts) < 4 or parts[1] != "download":
+            self.send_json({"error": "Unknown download"}, status=404, head_only=head_only)
+            return
+        token = parts[2]
+        exported = self.runtime.resolve_export_token(token)
+        if exported is None:
+            self.send_json({"error": "Download expired or unknown"}, status=404, head_only=head_only)
+            return
+        path, file_name, mime_type, size = exported
+        try:
+            current_size = path.stat().st_size
+        except OSError:
+            self.send_json({"error": "File unavailable"}, status=404, head_only=head_only)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", mime_type)
+        self.send_header("Content-Length", str(current_size))
+        self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + urllib.parse.quote(file_name, safe=""))
+        self.send_header("Cache-Control", "private, no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if head_only:
+            return
+        try:
+            with path.open("rb") as handle:
+                shutil.copyfileobj(handle, self.wfile, length=1024 * 1024)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def do_DELETE(self) -> None:
         request_path = self.path.split("?", 1)[0]
