@@ -7,7 +7,7 @@ properties, annotations, and error codes with the contract.
 ## Fixed inventory
 
 The registry holds exactly 21 tools. Two are gated, so a default `tools/list`
-advertises 20:
+advertises 20 before any operator-configured suppression:
 
 - `server_info`: server, workspace, automatic project context, policy, runtime,
   auth, protocol, and fixed-catalog metadata.
@@ -47,7 +47,12 @@ Two gates apply, and they are not tool profiles:
   stays reachable by name in every mode, so removing it from the catalog does
   not break a client that calls it anyway.
 
-The remaining 19 tools are always advertised, and `listChanged` is `false`.
+`CODING_TOOLS_MCP_DISABLED_TOOLS` accepts a comma-separated list of exact
+registered names. Each selected tool is omitted from `tools/list`,
+`server_info`, and the server card, and is not callable even if a client already
+knows its name. Unknown names and glob patterns fail startup instead of leaving
+a mistyped tool exposed. Apart from this explicit suppression and the two gates
+above, the remaining tools are advertised, and `listChanged` is `false`.
 
 Each tool declares its own `outputSchema` naming the fields it actually
 returns — `command_id`, `exit_code`, `output_ref`, `revision`,

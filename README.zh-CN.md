@@ -133,6 +133,16 @@ coding-tools-mcp-desktop
 | Git | `git_status` · `git_diff` · `git_log` · `git_show` · `git_blame` |
 | 运行时 | `server_info` · `check_exec_environment` |
 
+运维人员可以通过逗号分隔的 `CODING_TOOLS_MCP_DISABLED_TOOLS` 环境变量，
+从对外目录中移除指定工具。被禁用的工具不会出现在 `tools/list`、
+`server_info` 或服务器卡片中，按名称直接调用也只会得到未知工具错误。
+这里只接受精确工具名；未知名称和 glob 通配模式会导致启动失败。例如：
+
+```bash
+CODING_TOOLS_MCP_DISABLED_TOOLS=git_status,git_diff,git_log,git_show,git_blame \
+  coding-tools-mcp --stdio --workspace /path/to/repo
+```
+
 仓库根部的 `AGENTS.md`/`CLAUDE.md` 会自动载入，并随 `initialize` 的
 `instructions` 下发；不握手的客户端则通过 `server/discover` 拿到同一份内容。
 工具的 `content` 是给 agent 看的精炼文本，`structuredContent` 则是完整稳定的

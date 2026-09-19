@@ -2692,5 +2692,86 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
                 self.assertEqual(server_module.run_http(args), 2)
 
 
+class DisabledToolTests(unittest.TestCase):
+    GIT_TOOLS = ("git_status", "git_diff", "git_log", "git_show", "git_blame")
+
+    def test_disabled_tools_are_absent_from_every_public_catalog_and_not_callable(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp),
+                permission_mode="dangerous",
+                disabled_tool_names=self.GIT_TOOLS,
+            )
+            names = set(runtime.exposed_tool_names())
+            self.assertTrue(names.isdisjoint(self.GIT_TOOLS))
+            self.assertTrue(set(runtime.server_info_payload()["tools"]).isdisjoint(self.GIT_TOOLS))
+            self.assertTrue(
+                set(server_module.server_card_payload(runtime)["tools"]["names"]).isdisjoint(
+                    self.GIT_TOOLS
+                )
+            )
+            for name in self.GIT_TOOLS:
+                with self.subTest(tool=name):
+                    with self.assertRaises(server_module.JsonRpcError) as cm:
+                        runtime.call_tool(name, {})
+                    self.assertEqual(cm.exception.code, -32602)
+                    self.assertEqual(cm.exception.data, {"reason": "unknown_tool"})
+
+    def test_explicit_disable_overrides_mode_gated_hidden_callability(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), disabled_tool_names=("request_permissions",))
+            with self.assertRaises(server_module.JsonRpcError):
+                runtime.call_tool(
+                    "request_permissions",
+                    {
+                        "tool_name": "exec_command",
+                        "permission": "network",
+                        "reason": "test",
+                        "arguments": {},
+                    },
+                )
+
+    def test_environment_accepts_only_exact_registered_names(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"CODING_TOOLS_MCP_DISABLED_TOOLS": " git_status,git_diff,git_status "},
+            clear=False,
+        ):
+            self.assertEqual(
+                server_module.disabled_tool_names_from_env(),
+                ("git_status", "git_diff"),
+            )
+
+        for value in ("git_*", "git_missing"):
+            with self.subTest(value=value), patch.dict(
+                os.environ,
+                {"CODING_TOOLS_MCP_DISABLED_TOOLS": value},
+                clear=False,
+            ):
+                with self.assertRaises(ToolFailure) as cm:
+                    server_module.disabled_tool_names_from_env()
+                self.assertEqual(cm.exception.code, "INVALID_ARGUMENT")
+
+    def test_build_runtime_applies_the_environment_suppression(self) -> None:
+        with TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"CODING_TOOLS_MCP_DISABLED_TOOLS": ",".join(self.GIT_TOOLS)},
+            clear=False,
+        ):
+            parser = server_module.build_parser()
+            args = parser.parse_args(["--workspace", tmp, "--stdio"])
+            runtime = server_module.build_runtime(
+                args,
+                server_module.runtime_policy_from_args(args),
+                emit_warning=False,
+            )
+            try:
+                self.assertTrue(
+                    set(runtime.exposed_tool_names()).isdisjoint(self.GIT_TOOLS)
+                )
+            finally:
+                runtime.close()
+
+
 def file_path(name: str):
     return Path(name)

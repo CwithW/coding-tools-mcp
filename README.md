@@ -146,6 +146,17 @@ staged, baseline-checked, atomic across files, and support rollback.
 | Git | `git_status` · `git_diff` · `git_log` · `git_show` · `git_blame` |
 | Runtime | `server_info` · `check_exec_environment` |
 
+Operators can remove exact tools from the exposed catalog with the
+comma-separated `CODING_TOOLS_MCP_DISABLED_TOOLS` environment variable. A
+disabled tool is omitted from `tools/list`, `server_info`, and the server card,
+and a direct call by name is rejected as an unknown tool. Names are exact;
+unknown names and glob patterns fail startup. For example:
+
+```bash
+CODING_TOOLS_MCP_DISABLED_TOOLS=git_status,git_diff,git_log,git_show,git_blame \
+  coding-tools-mcp --stdio --workspace /path/to/repo
+```
+
 Root `AGENTS.md`/`CLAUDE.md` files load automatically and come back in the
 `instructions` of `initialize`, or of `server/discover` for a client that
 never handshakes. Tool `content` is concise agent-facing text;

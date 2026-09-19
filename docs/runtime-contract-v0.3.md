@@ -402,8 +402,14 @@ survive tunnel churn. Forwarded headers are ignored unless
 ## Stable tool inventory
 
 The default catalog has 20 tools, including `view_image`. Setting
-`CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` is the sole installation capability gate
-and removes only that optional binary-content tool. It is not a tool profile.
+`CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` is the installation capability gate and
+removes only that optional binary-content tool. It is not a tool profile.
+
+Operators may additionally set `CODING_TOOLS_MCP_DISABLED_TOOLS` to a
+comma-separated list of exact registered tool names. Selected tools are absent
+from `tools/list`, `server_info`, and the server card, and direct calls are
+rejected as unknown tools. Unknown names and glob patterns fail startup, so a
+misspelled suppression cannot silently expose the intended tool.
 
 Each definition below lists the live input property names and annotations. The
 authoritative JSON Schemas are returned by `tools/list` and checked for drift in

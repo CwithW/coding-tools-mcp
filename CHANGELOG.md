@@ -29,6 +29,11 @@ The v0.5.0 reliability work. Migration notes:
 
 ### Added
 
+- **Exact per-tool suppression with `CODING_TOOLS_MCP_DISABLED_TOOLS`.** The
+  comma-separated names are removed from `tools/list`, `server_info`, and the
+  server card, and direct calls are rejected as unknown tools. Unknown names
+  and glob patterns fail startup rather than silently leaving a tool exposed.
+
 - **`apply_changes`**, a line-addressed editing tool. Each change names an
   action (`create`, `write`, `edit`, `delete`, `move`, `copy`) and a path.
   Existing targets use the `revision` `read_file` reported. `write` is an

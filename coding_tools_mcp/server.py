@@ -947,6 +947,28 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
 }
 
+
+def validate_disabled_tool_names(names: tuple[str, ...]) -> tuple[str, ...]:
+    """Validate exact tool names and return them once in registry order."""
+
+    requested = frozenset(name.strip() for name in names if name.strip())
+    unknown = sorted(requested.difference(TOOL_REGISTRY))
+    if unknown:
+        joined = ", ".join(unknown)
+        raise ToolFailure(
+            "INVALID_ARGUMENT",
+            f"{ENV_PREFIX}_DISABLED_TOOLS contains unknown tool names: {joined}. "
+            "Only exact registered tool names are accepted; glob patterns are not supported.",
+            category="validation",
+            details={"unknown_tools": unknown},
+        )
+    return tuple(name for name in TOOL_REGISTRY if name in requested)
+
+
+def disabled_tool_names_from_env() -> tuple[str, ...]:
+    raw = os.environ.get(f"{ENV_PREFIX}_DISABLED_TOOLS") or ""
+    return validate_disabled_tool_names(tuple(raw.split(",")))
+
 LANDLOCK_CREATE_RULESET_VERSION = 1
 LANDLOCK_RULE_PATH_BENEATH = 1
 SYS_LANDLOCK_CREATE_RULESET = 444
@@ -1528,6 +1550,7 @@ class Runtime:
         project_context: ProjectContext | None = None,
         fake_readonly_annotations: bool = False,
         workspace_mutation: WorkspaceMutationPolicy | None = None,
+        disabled_tool_names: tuple[str, ...] = (),
         transport: str = "stdio",
         command_manager: WorkspaceCommandManager | None = None,
     ) -> None:
@@ -1552,12 +1575,14 @@ class Runtime:
         self.permission_mode = permission_mode
         self.capabilities = PERMISSION_MODE_CAPABILITIES[permission_mode]
         self.dangerously_skip_all_permissions = self.capabilities.skip_all_permissions
+        self.disabled_tool_names = frozenset(validate_disabled_tool_names(disabled_tool_names))
         # Computed after the permission mode resolves: `gated_by` names a
         # runtime property, and one of the gates is the permission mode.
         self._exposed_tool_names = [
             name
             for name, spec in TOOL_REGISTRY.items()
-            if spec.gated_by is None or getattr(self, spec.gated_by)
+            if name not in self.disabled_tool_names
+            and (spec.gated_by is None or getattr(self, spec.gated_by))
         ]
         self._exposed_tool_name_set = frozenset(self._exposed_tool_names)
         # Faking annotations is only defensible where the caller has already
@@ -1628,7 +1653,11 @@ class Runtime:
             project_context if project_context is not None else load_project_context(self.workspace.root)
         )
         self.telemetry = SessionTelemetry(permission_mode=self.permission_mode, transport=transport)
-        self._tool_handlers = {name: getattr(self, name) for name in TOOL_REGISTRY}
+        self._tool_handlers = {
+            name: getattr(self, name)
+            for name in TOOL_REGISTRY
+            if name not in self.disabled_tool_names
+        }
 
     def _set_runtime_dir(self, runtime_dir: Path) -> None:
         self.runtime_dir = runtime_dir
@@ -2131,6 +2160,8 @@ class Runtime:
             }
 
     def _is_callable_tool(self, name: str) -> bool:
+        if name in self.disabled_tool_names:
+            return False
         if name in self._exposed_tool_name_set:
             return True
         spec = TOOL_REGISTRY.get(name)
@@ -7286,6 +7317,7 @@ def build_runtime(
         project_context=project_context,
         fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
         workspace_mutation=runtime_policy.workspace_mutation,
+        disabled_tool_names=disabled_tool_names_from_env(),
         transport=transport,
         command_manager=command_manager,
     )
